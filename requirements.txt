@@ -1,0 +1,8 @@
+# Azure SDK
+azure-search-documents==11.7.0b2
+azure-identity>=1.15.0
+azure-core>=1.30.0
+
+# Environment and utilities
+python-dotenv>=1.0.0
+requests>=2.31.0
