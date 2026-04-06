@@ -16,9 +16,27 @@ Azure Blob StorageからAzure AI Searchのナレッジソースを作成するPy
   - レイアウト解析とテーブル認識
   - 画像キャプション生成
   - インテリジェントなチャンク分割
-- Azure OpenAIを使用したテキスト埋め込みとチャット完了
+- **エンベディングと検索**:
+  - Azure OpenAI text-embedding-3-large (3072次元) によるベクトル化
+  - Azure AI Search が最適な検索方式を自動選択（ベクトル、キーワード、またはハイブリッド）
+  - セマンティックランキング対応（Azure AI Search機能、有効化が必要）
+- Azure OpenAI gpt-4.1 を使用した高度なクエリ処理:
+  - Medium reasoning effort（LLMによるクエリプランニング）
+  - 自然言語による回答生成（answerSynthesis）
+  - 引用付き回答
 - 画像抽出とAsset Storeへの保存
 - ナレッジベースの作成と取得テスト
+
+## ⚠️ 重要な制限事項
+
+### Content Understanding のドキュメントサイズ制限
+
+- **16MB以下のドキュメント**: Content Understandingで完全処理（テキスト抽出、レイアウト解析、テーブル認識、画像キャプション）
+- **16MB超のドキュメント**: 
+  - Content Understandingの処理制限により警告が記録される
+  - ドキュメントの本文内容は検索対象にならない可能性がある
+  - インデクサーは停止せず、他のドキュメントの処理は継続される
+  - **対処方法**: 大きなドキュメントは16MB以下に分割することを推奨
 
 ## 前提条件
 
@@ -89,6 +107,7 @@ RETRIEVE_TEST_QUERY=このナレッジベースの対象領域を説明して
   - インテリジェントなチャンク分割
   - `AI_SERVICES_ENDPOINT`: Content Understanding用のAI Servicesエンドポイント（**必須**、cognitiveservices.azure.com）
   - `ASSET_STORE_*`: 抽出された画像を保存するBlob Storage（**必須**）
+  - **制限**: 16MB超のドキュメントは処理制限により警告が記録される（本文検索不可の可能性）
 
 **認証について:**
 - すべてのリソースへのアクセスはEntra IDマネージドIDを使用
@@ -191,8 +210,19 @@ python create_knowledge_blob.py
 2. Azure Blob Storageからナレッジソースを作成（STANDARD mode）
 3. Content Understandingによる高度なドキュメント解析
 4. インジェスト状態の監視
-5. ナレッジベースの作成（LLM統合、medium reasoning effort）
-6. 取得テスト（自然言語回答生成）
+5. **インデクサーのリセットと再実行**
+   - 既存のインデックス状態をリセット
+   - 最新のContent Understanding設定で全ドキュメントを再処理
+   - バックグラウンドで実行継続
+6. ナレッジベースの作成（LLM統合、medium reasoning effort）
+7. 取得テスト（自然言語回答生成、引用付き回答）
+
+**📌 処理結果について:**
+- **成功**: 16MB以下のドキュメントは完全に処理され、検索可能になります
+- **警告**: 16MB超のドキュメントは警告として記録されますが、インデクサーは停止しません
+- **制限**: 警告が出たドキュメントの本文内容は検索対象にならない可能性があります
+
+詳細は Azure Portal の「インデクサー」→「実行履歴」で確認できます。
 
 ## プロジェクト構成
 
@@ -211,18 +241,22 @@ python create_knowledge_blob.py
 
 ## 出力
 
-スクリプトは以下のAzure AI Searchオブジェクトを自動的に作成します：
+スクリプトは以下のAzure AI Searchオブジェクトを自動的に作成・更新します：
 
 - **ナレッジソース (STANDARD mode)**: Blob Storageコンテナーへの接続とContent Understanding統合
-- **データソース**: Blobコンテナーの定義
+- **データソース**: Blobコンテナーの定義（Entra ID認証、ResourceId形式）
 - **スキルセット**: Content Understandingを使用した高度なドキュメント解析、コンテンツのチャンク化、ベクトル化
 - **インデックス**: エンリッチされたコンテンツの保存
-- **インデクサー**: インデックス作成パイプラインの実行
+- **インデクサー**: 
+  - インデックス作成パイプラインの実行
+  - スクリプト実行時に自動的にリセット・再実行
+  - 最新のContent Understanding設定で全ドキュメントを再処理
+  - 16MB超のドキュメントは警告記録（処理継続）
 - **ナレッジベース (medium reasoning effort)**: 
-  - LLMによるクエリプランニングと回答生成
-  - outputMode: answerSynthesis（自然言語回答）
-  - Azure OpenAI モデル統合
-- **Asset Store**: 抽出された画像の保存
+  - LLMによるクエリプランニング（サブクエリ生成、並列実行）
+  - outputMode: answerSynthesis（自然言語回答、引用付き）
+  - Azure OpenAI gpt-4.1 モデル統合
+- **Asset Store**: 抽出された画像の保存（Blob Storage）
 
 ## トラブルシューティング
 
@@ -302,6 +336,26 @@ az role assignment create --role "Storage Blob Data Reader" --assignee $search_p
 - リソースURIが正しいか確認（`https://account.blob.core.windows.net/`形式）
 - マネージドIDに必要なロールが割り当てられているか確認
 - Azure AI Searchのクォータを確認
+
+### インデクサーに警告が表示される（16MB超のドキュメント）
+
+**症状**: 
+- インデクサーの実行履歴に「Document is 'XXXXXXX' bytes, which exceeds the maximum size '16777216' bytes」という警告が表示される
+
+**説明**:
+- これはContent Understandingの処理制限（16MB）によるものです
+- **インデクサーは停止せず、他のドキュメントの処理は継続されます**
+- 16MB超のドキュメントの本文内容は検索対象にならない可能性があります
+
+**対処方法**:
+1. **推奨**: 大きなドキュメントを16MB以下の複数ファイルに分割
+2. **許容**: 警告を承諾し、16MB以下のドキュメントのみ検索対象とする
+3. **確認**: Azure Portal の「インデクサー」→「実行履歴」で処理状況を確認
+
+**影響範囲**:
+- ✅ 16MB以下のドキュメント: 完全に処理され、検索可能
+- ⚠️ 16MB超のドキュメント: 警告記録、本文検索不可の可能性
+- ✅ システム全体: 正常に動作継続
 
 ### APIエラー
 

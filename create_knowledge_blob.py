@@ -256,6 +256,81 @@ def check_ingestion_status(config, max_wait_seconds=300):
     return False
 
 
+def reset_and_run_indexer(config):
+    """インデクサーをリセットして再実行"""
+    print(f"\n{'='*60}")
+    print("インデクサーをリセットして再実行中...")
+    print(f"{'='*60}")
+    
+    try:
+        credential = DefaultAzureCredential(exclude_interactive_browser_credential=False)
+        token = credential.get_token("https://search.azure.com/.default").token
+    except Exception as e:
+        print(f"✗ 認証に失敗: {str(e)}")
+        return False
+    
+    # インデクサー名はナレッジソース名 + "-indexer"
+    indexer_name = f"{config['knowledge_source_name']}-indexer"
+    
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    params = {"api-version": config["search_api_version"]}
+    
+    # インデクサーをリセット
+    reset_endpoint = f"{config['search_endpoint']}/indexers/{indexer_name}/reset"
+    print(f"\nインデクサー '{indexer_name}' をリセット中...")
+    reset_response = requests.post(reset_endpoint, params=params, headers=headers)
+    
+    if reset_response.status_code in [200, 204]:
+        print(f"✓ インデクサーをリセットしました")
+    else:
+        print(f"⚠ インデクサーのリセットに失敗: {reset_response.status_code}")
+        print(reset_response.text)
+    
+    # インデクサーを再実行
+    run_endpoint = f"{config['search_endpoint']}/indexers/{indexer_name}/run"
+    print(f"\nインデクサー '{indexer_name}' を再実行中...")
+    run_response = requests.post(run_endpoint, params=params, headers=headers)
+    
+    if run_response.status_code in [200, 202, 204]:
+        print(f"✓ インデクサーを再実行しました")
+        
+        # インデクサーの実行状態を確認
+        status_endpoint = f"{config['search_endpoint']}/indexers/{indexer_name}/status"
+        print(f"\nインデクサーの実行状態を確認中...")
+        
+        max_wait = 60  # 60秒待機
+        start_time = time.time()
+        while time.time() - start_time < max_wait:
+            status_response = requests.get(status_endpoint, params=params, headers=headers)
+            if status_response.status_code == 200:
+                status_data = status_response.json()
+                last_result = status_data.get("lastResult")
+                if last_result:
+                    status_value = last_result.get("status")
+                    if status_value == "success":
+                        print(f"✓ インデクサーの実行が完了しました")
+                        print(f"  - 処理済みドキュメント: {last_result.get('itemsProcessed', 0)}")
+                        print(f"  - 失敗: {last_result.get('itemsFailed', 0)}")
+                        return True
+                    elif status_value == "inProgress":
+                        print(".", end="", flush=True)
+                    elif status_value == "transientFailure":
+                        print(f"\n⚠ 一時的なエラーが発生しましたが、再試行します")
+                    else:
+                        print(f"\n⚠ インデクサーの状態: {status_value}")
+            time.sleep(5)
+        
+        print(f"\n✓ インデクサーを開始しました（バックグラウンドで実行中）")
+        return True
+    else:
+        print(f"✗ インデクサーの再実行に失敗: {run_response.status_code}")
+        print(run_response.text)
+        return False
+
+
 def create_knowledge_base(config):
     """ナレッジベースを作成"""
     print(f"\n{'='*60}")
@@ -395,6 +470,9 @@ def main():
         
         # インジェストの状態を確認（最大5分待機）
         check_ingestion_status(config, max_wait_seconds=300)
+        
+        # インデクサーをリセットして再実行（最新の設定で再処理）
+        reset_and_run_indexer(config)
         
         # ナレッジベースを作成
         create_knowledge_base(config)
